@@ -246,6 +246,11 @@ export default function App() {
                               else setSelectedToDiscard(prev => [...prev, card.id]);
                             }
                           }}
+                          onMouseLeave={() => {
+                            if (gameMode === GameMode.GM) {
+                              setOpenGMCards(prev => prev.filter(id => id !== card.id));
+                            }
+                          }}
                           onDoubleClick={() => {
                             if (gameMode === GameMode.GM) {
                               setOpenGMCards(prev => prev.includes(card.id) ? prev.filter(id => id !== card.id) : [...prev, card.id]);
