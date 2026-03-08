@@ -436,7 +436,7 @@ export class GameEngine {
     for (const p of this.state.players) {
       if (p.state === PlayerState.DEAD) continue;
 
-      const dangerCount = p.field.filter(c => c.properties.includes(CardProperty.DANGER)).length;
+      const dangerCount = p.field.reduce((count, c) => c.properties.includes(CardProperty.DANGER) ? count + 1 : count, 0);
       if (dangerCount >= 3 && p.state !== PlayerState.DYING) {
         p.state = PlayerState.DYING;
         this.log(`!!! ${p.name} 拥有 3 张危险情报，进入濒死状态！!!!`);
@@ -474,7 +474,7 @@ export class GameEngine {
 
     const thumbPlayers = this.state.players.filter(p => p.faction === Faction.THUMB && p.state !== PlayerState.DEAD);
     for (const p of thumbPlayers) {
-      const topSecretCount = p.field.filter(c => c.properties.includes(CardProperty.TOP_SECRET)).length;
+      const topSecretCount = p.field.reduce((count, c) => c.properties.includes(CardProperty.TOP_SECRET) ? count + 1 : count, 0);
       if (topSecretCount >= 3) {
         this.log(`THUMB 阵营胜利！（${p.name} 集齐了 3 张绝密情报）`);
         this.state.winner = Faction.THUMB;
@@ -486,7 +486,7 @@ export class GameEngine {
 
     const busPlayers = this.state.players.filter(p => p.faction === Faction.BUS && p.state !== PlayerState.DEAD);
     for (const p of busPlayers) {
-      const importantCount = p.field.filter(c => c.properties.includes(CardProperty.TOP_SECRET) || c.properties.includes(CardProperty.PRECIOUS)).length;
+      const importantCount = p.field.reduce((count, c) => (c.properties.includes(CardProperty.TOP_SECRET) || c.properties.includes(CardProperty.PRECIOUS)) ? count + 1 : count, 0);
       if (importantCount >= 6) {
         this.log(`BUS 阵营胜利！（${p.name} 集齐了 6 张重要情报）`);
         this.state.winner = Faction.BUS;
@@ -498,7 +498,7 @@ export class GameEngine {
 
     const fingerPlayers = this.state.players.filter(p => p.faction === Faction.FINGER && p.state !== PlayerState.DEAD);
     for (const p of fingerPlayers) {
-      const preciousCount = p.field.filter(c => c.properties.includes(CardProperty.PRECIOUS)).length;
+      const preciousCount = p.field.reduce((count, c) => c.properties.includes(CardProperty.PRECIOUS) ? count + 1 : count, 0);
       if (preciousCount >= 3) {
         this.log(`FINGER 阵营胜利！（${p.name} 集齐了 3 张珍贵情报）`);
         this.state.winner = Faction.FINGER;
