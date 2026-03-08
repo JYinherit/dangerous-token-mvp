@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { GameEngine } from './game/engine';
 import { GameState, TurnPhase, PassMethod, PlayerState, CardProperty, GameMode, Zone } from './game/types';
 import { Shield, Check, X, Trash2, Image, FolderOpen, X as XIcon } from 'lucide-react';
-import { getCache, saveToCache, removeFromCache, clearCache, formatFileSize, ImageCacheEntry } from './imageCache';
+import { getCache, batchSaveToCache, getImageObjectUrl, generateThumbnail, removeFromCache, clearCache, formatFileSize, ImageCacheMeta } from './imageCache';
 
 const CARD_PROPERTIES_CONFIG = [
   { value: CardProperty.TOP_SECRET, label: '绝密', colorClass: 'text-red-400' },
@@ -30,26 +30,47 @@ export default function App() {
   const [rngResult, setRngResult] = useState<number | null>(null);
 
   // Image Cache States
-  const [imageCache, setImageCache] = useState<Map<string, ImageCacheEntry>>(() => getCache());
+  const [imageCache, setImageCache] = useState<Map<string, ImageCacheMeta>>(new Map());
+  const [selectedCacheName, setSelectedCacheName] = useState<string | null>(null);
   const [showCachePanel, setShowCachePanel] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // 追踪当前 Object URL 以便切换时撤销
+  const prevObjectUrlRef = useRef<string | null>(null);
 
-  /** 刷新缓存状态 */
-  const refreshCache = useCallback(() => setImageCache(getCache()), []);
+  /** 刷新缓存元数据（不含 Blob，极小） */
+  const refreshCache = useCallback(() => { getCache().then(setImageCache); }, []);
 
-  /** 处理本地文件上传 */
-  const handleFileUpload = useCallback((file: File) => {
-    if (!file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const dataUrl = ev.target?.result as string;
-      if (!dataUrl) return;
-      saveToCache(file.name, dataUrl, file.size);
-      setDealerImageUrl(dataUrl);
+  // 初始化时加载缓存
+  useEffect(() => { refreshCache(); }, [refreshCache]);
+
+  /** 设置图片 URL，自动撤销上一个 Object URL */
+  const applyImageUrl = useCallback((url: string, cacheName: string | null = null) => {
+    if (prevObjectUrlRef.current?.startsWith('blob:')) {
+      URL.revokeObjectURL(prevObjectUrlRef.current);
+    }
+    prevObjectUrlRef.current = url.startsWith('blob:') ? url : null;
+    setDealerImageUrl(url);
+    setSelectedCacheName(cacheName);
+  }, []);
+
+  /** 将 FileList 中所有图片生成缩略图后存入 IndexedDB（Blob 原始存储，无 Base64 开销） */
+  const handleFilesUpload = useCallback((files: FileList) => {
+    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+
+    Promise.all(imageFiles.map(async (file) => ({
+      name: file.name,
+      blob: file as Blob,
+      thumbnail: await generateThumbnail(file), // Canvas 小图，仅几 KB
+      size: file.size,
+    }))).then(async (results) => {
+      await batchSaveToCache(results); // 一个 IDB 事务
+      const last = results[results.length - 1];
+      // 直接用已有的 File 创建 Object URL，无需再读 IDB
+      applyImageUrl(URL.createObjectURL(last.blob), last.name);
       refreshCache();
-    };
-    reader.readAsDataURL(file);
-  }, [refreshCache]);
+    });
+  }, [refreshCache, applyImageUrl]);
 
   // Rename & Faction State
   const [editingPlayerId, setEditingPlayerId] = useState<string | null>(null);
@@ -176,9 +197,9 @@ export default function App() {
                 <input
                   type="text"
                   placeholder="粘贴图片 URL..."
-                  value={dealerImageUrl.startsWith('data:') ? '（本地文件）' : dealerImageUrl}
-                  readOnly={dealerImageUrl.startsWith('data:')}
-                  onChange={e => setDealerImageUrl(e.target.value)}
+                  value={dealerImageUrl.startsWith('blob:') ? '（本地文件）' : dealerImageUrl}
+                  readOnly={dealerImageUrl.startsWith('blob:')}
+                  onChange={e => applyImageUrl(e.target.value)}
                   className="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 flex-1 min-w-[160px] text-xs text-zinc-300"
                 />
                 {/* 本地文件上传 */}
@@ -186,8 +207,9 @@ export default function App() {
                   ref={fileInputRef}
                   type="file"
                   accept="image/*"
+                  multiple
                   className="hidden"
-                  onChange={e => { const f = e.target.files?.[0]; if (f) handleFileUpload(f); e.target.value = ''; }}
+                  onChange={e => { if (e.target.files?.length) handleFilesUpload(e.target.files); e.target.value = ''; }}
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
@@ -203,7 +225,7 @@ export default function App() {
                   缓存 ({imageCache.size})
                 </button>
                 {dealerImageUrl && (
-                  <button onClick={() => setDealerImageUrl('')} className="text-zinc-500 hover:text-red-400 transition-colors" title="清除图片">
+                  <button onClick={() => applyImageUrl('')} className="text-zinc-500 hover:text-red-400 transition-colors" title="清除图片">
                     <XIcon size={14} />
                   </button>
                 )}
@@ -219,7 +241,7 @@ export default function App() {
                     <div className="flex gap-2">
                       {imageCache.size > 0 && (
                         <button
-                          onClick={() => { clearCache(); refreshCache(); }}
+                          onClick={() => { clearCache().then(() => refreshCache()); }}
                           className="text-xs text-red-500 hover:text-red-400 transition-colors"
                         >全部清除</button>
                       )}
@@ -230,20 +252,24 @@ export default function App() {
                     <p className="text-xs text-zinc-600 text-center py-3">暂无缓存，上传本地图片后将自动保存</p>
                   ) : (
                     <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2 max-h-36 overflow-y-auto">
-                      {Array.from(imageCache.values()).sort((a, b) => b.lastUsed - a.lastUsed).map(entry => (
+                      {Array.from<ImageCacheMeta>(imageCache.values()).sort((a, b) => b.lastUsed - a.lastUsed).map(entry => (
                         <div
                           key={entry.name}
-                          className={`group relative flex flex-col items-center cursor-pointer rounded-md overflow-hidden border transition-all ${dealerImageUrl === entry.dataUrl ? 'border-indigo-500 ring-1 ring-indigo-500' : 'border-zinc-700 hover:border-zinc-500'}`}
-                          onClick={() => setDealerImageUrl(entry.dataUrl)}
+                          className={`group relative flex flex-col items-center cursor-pointer rounded-md overflow-hidden border transition-all ${selectedCacheName === entry.name ? 'border-indigo-500 ring-1 ring-indigo-500' : 'border-zinc-700 hover:border-zinc-500'}`}
+                          onClick={() => {
+                            getImageObjectUrl(entry.name).then(url => {
+                              if (url) applyImageUrl(url, entry.name);
+                            });
+                          }}
                           title={`${entry.name}\n${formatFileSize(entry.size)}`}
                         >
-                          <img src={entry.dataUrl} alt={entry.name} className="w-full h-12 object-cover" />
+                          <img src={entry.thumbnail} alt={entry.name} className="w-full h-12 object-cover" />
                           <div className="w-full bg-zinc-900 px-1 py-0.5">
                             <p className="text-[9px] text-zinc-400 truncate">{entry.name}</p>
                             <p className="text-[9px] text-zinc-600">{formatFileSize(entry.size)}</p>
                           </div>
                           <button
-                            onClick={e => { e.stopPropagation(); removeFromCache(entry.name); if (dealerImageUrl === entry.dataUrl) setDealerImageUrl(''); refreshCache(); }}
+                            onClick={e => { e.stopPropagation(); removeFromCache(entry.name).then(() => { if (selectedCacheName === entry.name) applyImageUrl(''); refreshCache(); }); }}
                             className="absolute top-0.5 right-0.5 bg-black/60 hover:bg-red-600 text-zinc-300 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
                           >
                             <Trash2 size={8} />

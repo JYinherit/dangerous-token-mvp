@@ -1,73 +1,147 @@
 /**
- * imageCache.ts
- * 使用 localStorage 缓存卡牌图片（以 Base64 dataURL 存储）。
- * 缓存条目记录：文件名、数据URL、原始文件大小（字节）、最后使用时间戳。
+ * imageCache.ts — Blob 版（无 Base64 开销）
+ *
+ * 存储策略：
+ *  - IndexedDB 存储原始 Blob（零编码开销，支持几百 MB）
+ *  - 上传时 Canvas 生成 ~160px JPEG 缩略图（几 KB）缓存供面板展示
+ *  - 取图时 URL.createObjectURL(blob) → 极短字符串引用，instant
  */
 
-const CACHE_KEY = 'dangerous-token-image-cache';
+const DB_NAME = 'dangerous-token-images-v2';
+const DB_VERSION = 1;
+const STORE_NAME = 'images';
+const THUMBNAIL_MAX = 160; // px
 
-export interface ImageCacheEntry {
-    /** 原始文件名，作为唯一标识 */
+// ── 导出类型 ─────────────────────────────────────────────────────
+
+/** React state 中存储的轻量 meta（不含 Blob / Base64，内存极小） */
+export interface ImageCacheMeta {
     name: string;
-    /** Base64 dataURL，可直接用于 <img src> */
-    dataUrl: string;
-    /** 原始文件大小（字节） */
+    thumbnail: string; // 小 JPEG Base64，仅用于缩略图面板
     size: number;
-    /** 最后使用时间戳（ms） */
     lastUsed: number;
 }
 
-/** 读取整个缓存（返回名称->条目的 Map） */
-export function getCache(): Map<string, ImageCacheEntry> {
-    try {
-        const raw = localStorage.getItem(CACHE_KEY);
-        if (!raw) return new Map();
-        const obj: Record<string, ImageCacheEntry> = JSON.parse(raw);
-        return new Map(Object.entries(obj));
-    } catch {
-        return new Map();
-    }
+/** IndexedDB 内部存储结构 */
+interface ImageCacheDBEntry extends ImageCacheMeta {
+    blob: Blob;
 }
 
-/** 将图片保存到缓存 */
-export function saveToCache(name: string, dataUrl: string, size: number): ImageCacheEntry {
-    const cache = getCache();
-    const entry: ImageCacheEntry = { name, dataUrl, size, lastUsed: Date.now() };
-    cache.set(name, entry);
-    persistCache(cache);
-    return entry;
+// ── 内部：打开 DB ─────────────────────────────────────────────────
+
+function openDB(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = (ev) => {
+            const db = (ev.target as IDBOpenDBRequest).result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: 'name' });
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
 }
 
-/** 更新某条缓存的 lastUsed 时间 */
-export function touchCache(name: string): void {
-    const cache = getCache();
-    const entry = cache.get(name);
-    if (entry) {
-        entry.lastUsed = Date.now();
-        persistCache(cache);
-    }
+// ── 缩略图生成（Canvas，不产生大字符串）────────────────────────────
+
+export async function generateThumbnail(blob: Blob): Promise<string> {
+    return new Promise((resolve) => {
+        const img = new Image();
+        const url = URL.createObjectURL(blob);
+        img.onload = () => {
+            const ratio = Math.min(THUMBNAIL_MAX / img.width, THUMBNAIL_MAX / img.height, 1);
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.round(img.width * ratio);
+            canvas.height = Math.round(img.height * ratio);
+            canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
+            URL.revokeObjectURL(url);
+            resolve(canvas.toDataURL('image/jpeg', 0.75));
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); resolve(''); };
+        img.src = url;
+    });
+}
+
+// ── 公共 API ──────────────────────────────────────────────────────
+
+/** 读取全部缓存的轻量 Meta（不含 Blob），适合 React state */
+export async function getCache(): Promise<Map<string, ImageCacheMeta>> {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const req = tx.objectStore(STORE_NAME).getAll();
+        req.onsuccess = () => {
+            const all = req.result as ImageCacheDBEntry[];
+            resolve(new Map(all.map(e => [e.name, { name: e.name, thumbnail: e.thumbnail, size: e.size, lastUsed: e.lastUsed }])));
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+/**
+ * 获取指定图片的 Object URL（即时，无编码开销）。
+ * 调用方负责在不需要时 URL.revokeObjectURL()。
+ */
+export async function getImageObjectUrl(name: string): Promise<string | null> {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.get(name);
+        req.onsuccess = () => {
+            const entry = req.result as ImageCacheDBEntry | undefined;
+            if (!entry) { resolve(null); return; }
+            store.put({ ...entry, lastUsed: Date.now() }); // 更新 lastUsed
+            resolve(URL.createObjectURL(entry.blob));
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+/**
+ * 批量保存图片（一个 IDB 事务，无竞态）。
+ * 调用方传入 File/Blob 即可，不需要提前转 Base64。
+ */
+export async function batchSaveToCache(
+    entries: Array<{ name: string; blob: Blob; thumbnail: string; size: number }>
+): Promise<void> {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        const now = Date.now();
+        entries.forEach(({ name, blob, thumbnail, size }, i) => {
+            store.put({ name, blob, thumbnail, size, lastUsed: now + i } satisfies ImageCacheDBEntry);
+        });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
 }
 
 /** 删除单条缓存 */
-export function removeFromCache(name: string): void {
-    const cache = getCache();
-    cache.delete(name);
-    persistCache(cache);
+export async function removeFromCache(name: string): Promise<void> {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.objectStore(STORE_NAME).delete(name);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
 }
 
 /** 清空所有缓存 */
-export function clearCache(): void {
-    localStorage.removeItem(CACHE_KEY);
+export async function clearCache(): Promise<void> {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.objectStore(STORE_NAME).clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
 }
 
-/** 内部：将 Map 序列化写回 localStorage */
-function persistCache(cache: Map<string, ImageCacheEntry>): void {
-    const obj: Record<string, ImageCacheEntry> = {};
-    cache.forEach((v, k) => { obj[k] = v; });
-    localStorage.setItem(CACHE_KEY, JSON.stringify(obj));
-}
-
-/** 格式化文件大小显示 */
+/** 格式化文件大小 */
 export function formatFileSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
