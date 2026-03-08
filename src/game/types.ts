@@ -13,6 +13,7 @@ export interface Card {
   properties: CardProperty[];
   currentZone: Zone;
   ownerId: string | null;
+  imageUrl?: string | null;
 }
 
 export interface Player {

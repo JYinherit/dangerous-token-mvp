@@ -100,6 +100,32 @@ export class GameEngine {
     return newPlayer;
   }
 
+  removePlayer(playerId: string) {
+    const idx = this.state.players.findIndex(p => p.id === playerId);
+    if (idx === -1) return;
+    const p = this.state.players[idx];
+    // Move all cards to discard
+    [...p.hand, ...p.field].forEach(c => {
+      c.currentZone = Zone.DISCARD;
+      c.ownerId = null;
+      this.state.discard.push(c);
+    });
+    this.state.players.splice(idx, 1);
+    this.log(`GM 移除了玩家 ${p.name}。`);
+    // Fix currentPlayerIndex if out of bounds
+    if (this.state.players.length > 0) {
+      this.state.currentPlayerIndex = this.state.currentPlayerIndex % this.state.players.length;
+      // Skip to next alive player
+      while (this.state.players.length > 0 && this.getCurrentPlayer().state === PlayerState.DEAD) {
+        this.state.currentPlayerIndex = (this.state.currentPlayerIndex + 1) % this.state.players.length;
+      }
+    } else {
+      this.state.currentPlayerIndex = 0;
+    }
+    this.checkWinConditions();
+    this.notify();
+  }
+
   renamePlayer(playerId: string, newName: string) {
     const p = this.getPlayer(playerId);
     const oldName = p.name;
@@ -272,7 +298,7 @@ export class GameEngine {
     }
   }
 
-  dealerGrantCard(playerId: string, cardName: string, properties: CardProperty[]) {
+  dealerGrantCard(playerId: string, cardName: string, properties: CardProperty[], imageUrl?: string | null) {
     const p = this.getPlayer(playerId);
     const card: Card = {
       id: generateId(),
@@ -281,6 +307,7 @@ export class GameEngine {
       properties: properties.length > 0 ? properties : [CardProperty.DANGER], // fallback
       currentZone: Zone.HAND,
       ownerId: p.id,
+      imageUrl: imageUrl || null,
     };
     p.hand.push(card);
     this.log(`GM 将 '${card.name}' 发给了 ${p.name}。`);

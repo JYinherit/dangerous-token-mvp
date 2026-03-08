@@ -1,7 +1,8 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { GameEngine } from './game/engine';
 import { GameState, TurnPhase, PassMethod, PlayerState, CardProperty, GameMode, Zone } from './game/types';
-import { Shield, AlertTriangle, Star, Check, X, Skull, ArrowRight, Trash2 } from 'lucide-react';
+import { Shield, Check, X, Trash2, Image, FolderOpen, X as XIcon } from 'lucide-react';
+import { getCache, saveToCache, removeFromCache, clearCache, formatFileSize, ImageCacheEntry } from './imageCache';
 
 const CARD_PROPERTIES_CONFIG = [
   { value: CardProperty.TOP_SECRET, label: '绝密', colorClass: 'text-red-400' },
@@ -23,9 +24,32 @@ export default function App() {
   const [dealerTarget, setDealerTarget] = useState<string>('p1');
   const [dealerCardName, setDealerCardName] = useState<string>('');
   const [dealerProps, setDealerProps] = useState<CardProperty[]>([CardProperty.DANGER]);
+  const [dealerImageUrl, setDealerImageUrl] = useState<string>('');
   const [rngMin, setRngMin] = useState(1);
   const [rngMax, setRngMax] = useState(10);
   const [rngResult, setRngResult] = useState<number | null>(null);
+
+  // Image Cache States
+  const [imageCache, setImageCache] = useState<Map<string, ImageCacheEntry>>(() => getCache());
+  const [showCachePanel, setShowCachePanel] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /** 刷新缓存状态 */
+  const refreshCache = useCallback(() => setImageCache(getCache()), []);
+
+  /** 处理本地文件上传 */
+  const handleFileUpload = useCallback((file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const dataUrl = ev.target?.result as string;
+      if (!dataUrl) return;
+      saveToCache(file.name, dataUrl, file.size);
+      setDealerImageUrl(dataUrl);
+      refreshCache();
+    };
+    reader.readAsDataURL(file);
+  }, [refreshCache]);
 
   // Rename & Faction State
   const [editingPlayerId, setEditingPlayerId] = useState<string | null>(null);
@@ -143,9 +167,94 @@ export default function App() {
                     <span className={colorClass}>{label}</span>
                   </label>
                 ))}
-                <button disabled={dealerProps.length === 0} onClick={() => { engine.dealerGrantCard(dealerTarget, dealerCardName, dealerProps); setDealerCardName(''); }} className="px-3 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-medium rounded transition-colors whitespace-nowrap">发给玩家</button>
+                <button disabled={dealerProps.length === 0} onClick={() => { engine.dealerGrantCard(dealerTarget, dealerCardName, dealerProps, dealerImageUrl || null); setDealerCardName(''); setDealerImageUrl(''); }} className="px-3 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-medium rounded transition-colors whitespace-nowrap">发给玩家</button>
                 <button onClick={() => engine.addPlayer()} className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white font-medium rounded transition-colors whitespace-nowrap">➕ 增加玩家</button>
               </div>
+              {/* Image Picker Row */}
+              <div className="flex flex-wrap gap-2 items-center">
+                <span className="text-xs text-zinc-500 flex items-center gap-1"><Image size={12} /> 卡牌图片:</span>
+                <input
+                  type="text"
+                  placeholder="粘贴图片 URL..."
+                  value={dealerImageUrl.startsWith('data:') ? '（本地文件）' : dealerImageUrl}
+                  readOnly={dealerImageUrl.startsWith('data:')}
+                  onChange={e => setDealerImageUrl(e.target.value)}
+                  className="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 flex-1 min-w-[160px] text-xs text-zinc-300"
+                />
+                {/* 本地文件上传 */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={e => { const f = e.target.files?.[0]; if (f) handleFileUpload(f); e.target.value = ''; }}
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex items-center gap-1 px-2 py-1 bg-zinc-700 hover:bg-zinc-600 text-xs text-zinc-200 rounded transition-colors whitespace-nowrap"
+                >
+                  <FolderOpen size={12} /> 本地文件
+                </button>
+                {/* 缓存选择器 */}
+                <button
+                  onClick={() => setShowCachePanel(v => !v)}
+                  className={`flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors whitespace-nowrap ${showCachePanel ? 'bg-indigo-600 text-white' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200'}`}
+                >
+                  缓存 ({imageCache.size})
+                </button>
+                {dealerImageUrl && (
+                  <button onClick={() => setDealerImageUrl('')} className="text-zinc-500 hover:text-red-400 transition-colors" title="清除图片">
+                    <XIcon size={14} />
+                  </button>
+                )}
+                {dealerImageUrl && (
+                  <img src={dealerImageUrl} alt="preview" className="w-8 h-10 object-cover rounded border border-zinc-600" onError={e => (e.target as HTMLImageElement).style.display = 'none'} />
+                )}
+              </div>
+              {/* Cache Panel */}
+              {showCachePanel && (
+                <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs text-zinc-400 font-medium">图片缓存 · {imageCache.size} 个文件</span>
+                    <div className="flex gap-2">
+                      {imageCache.size > 0 && (
+                        <button
+                          onClick={() => { clearCache(); refreshCache(); }}
+                          className="text-xs text-red-500 hover:text-red-400 transition-colors"
+                        >全部清除</button>
+                      )}
+                      <button onClick={() => setShowCachePanel(false)} className="text-zinc-500 hover:text-zinc-300"><XIcon size={14} /></button>
+                    </div>
+                  </div>
+                  {imageCache.size === 0 ? (
+                    <p className="text-xs text-zinc-600 text-center py-3">暂无缓存，上传本地图片后将自动保存</p>
+                  ) : (
+                    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2 max-h-36 overflow-y-auto">
+                      {Array.from(imageCache.values()).sort((a, b) => b.lastUsed - a.lastUsed).map(entry => (
+                        <div
+                          key={entry.name}
+                          className={`group relative flex flex-col items-center cursor-pointer rounded-md overflow-hidden border transition-all ${dealerImageUrl === entry.dataUrl ? 'border-indigo-500 ring-1 ring-indigo-500' : 'border-zinc-700 hover:border-zinc-500'}`}
+                          onClick={() => setDealerImageUrl(entry.dataUrl)}
+                          title={`${entry.name}\n${formatFileSize(entry.size)}`}
+                        >
+                          <img src={entry.dataUrl} alt={entry.name} className="w-full h-12 object-cover" />
+                          <div className="w-full bg-zinc-900 px-1 py-0.5">
+                            <p className="text-[9px] text-zinc-400 truncate">{entry.name}</p>
+                            <p className="text-[9px] text-zinc-600">{formatFileSize(entry.size)}</p>
+                          </div>
+                          <button
+                            onClick={e => { e.stopPropagation(); removeFromCache(entry.name); if (dealerImageUrl === entry.dataUrl) setDealerImageUrl(''); refreshCache(); }}
+                            className="absolute top-0.5 right-0.5 bg-black/60 hover:bg-red-600 text-zinc-300 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <Trash2 size={8} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
             </div>
             <div className="w-px h-12 bg-zinc-800 hidden xl:block"></div>
             <div className="flex items-center gap-3">
@@ -211,7 +320,18 @@ export default function App() {
                     {isDying && <span className="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 animate-pulse">DYING</span>}
                     {isDead && <span className="text-xs px-2 py-1 rounded bg-zinc-800 text-zinc-500">DEAD</span>}
                   </h3>
-                  <div className="text-xs text-zinc-500">手牌: {player.hand.length}</div>
+                  <div className="flex items-center gap-2">
+                    <div className="text-xs text-zinc-500">手牌: {player.hand.length}</div>
+                    {gameMode === GameMode.GM && (
+                      <button
+                        onClick={() => engine.removePlayer(player.id)}
+                        title="移除玩家"
+                        className="text-xs px-2 py-0.5 bg-red-900/40 hover:bg-red-700 text-red-400 hover:text-white border border-red-800/50 rounded transition-colors"
+                      >
+                        移除
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Field */}
@@ -282,27 +402,27 @@ export default function App() {
                             (gameMode === GameMode.GM && openGMCards.includes(card.id)) ||
                             (gameMode !== GameMode.GM && isCurrent && (gameState.currentPhase === TurnPhase.ACTION || gameState.currentPhase === TurnPhase.PASS) && !currentPlayer.hasPassed)
                           ) && (
-                              <div className={`absolute inset-0 bg-black/80 flex flex-col gap-1 items-center justify-center transition-opacity rounded-md ${pendingDeliverCardId === card.id || openGMCards.includes(card.id) ? 'opacity-100 z-20' : 'opacity-0 group-hover:opacity-100'}`}>
+                              <div className={`absolute inset-0 bg-black/85 flex flex-col gap-1.5 items-center justify-center transition-opacity rounded-md ${pendingDeliverCardId === card.id || openGMCards.includes(card.id) ? 'opacity-100 z-20' : 'opacity-0 group-hover:opacity-100'}`}>
                                 {pendingDeliverCardId === card.id ? (
                                   <>
-                                    <div className="text-[10px] text-zinc-300 font-medium mb-1 border-b border-zinc-700 w-full text-center pb-1">送给谁？</div>
-                                    <div className="flex flex-col gap-1 w-full px-2 overflow-y-auto" style={{ maxHeight: '70px' }}>
+                                    <div className="text-xs text-zinc-200 font-semibold border-b border-zinc-600 w-full text-center pb-1.5 mb-0.5">送给谁？</div>
+                                    <div className="flex flex-col gap-1 w-full px-2 overflow-y-auto" style={{ maxHeight: '120px' }}>
                                       {gameState.players.filter(p => p.id !== player.id && p.state !== PlayerState.DEAD).map(p => (
-                                        <button key={p.id} onClick={(e) => { e.stopPropagation(); engine.initiatePass(card.id, PassMethod.DELIVER, p.id); setPendingDeliverCardId(null); }} className="text-[10px] bg-indigo-600 hover:bg-indigo-500 py-0.5 rounded text-white truncate px-1">
+                                        <button key={p.id} onClick={(e) => { e.stopPropagation(); engine.initiatePass(card.id, PassMethod.DELIVER, p.id); setPendingDeliverCardId(null); }} className="text-xs bg-indigo-600 hover:bg-indigo-500 py-1 rounded text-white truncate px-2">
                                           {p.name}
                                         </button>
                                       ))}
                                     </div>
-                                    <button onClick={(e) => { e.stopPropagation(); setPendingDeliverCardId(null); }} className="text-[10px] w-14 bg-red-600/80 hover:bg-red-500 py-0.5 mt-1 rounded text-white">取消</button>
+                                    <button onClick={(e) => { e.stopPropagation(); setPendingDeliverCardId(null); }} className="text-xs w-16 bg-red-600/80 hover:bg-red-500 py-1 mt-0.5 rounded text-white">取消</button>
                                   </>
                                 ) : (
                                   <>
-                                    <button onClick={(e) => { e.stopPropagation(); engine.initiatePass(card.id, PassMethod.SECRET); }} className="text-[10px] w-14 bg-indigo-600 hover:bg-indigo-500 py-1 rounded text-white">机密</button>
-                                    <button onClick={(e) => { e.stopPropagation(); engine.initiatePass(card.id, PassMethod.REPORT); }} className="text-[10px] w-14 bg-indigo-600 hover:bg-indigo-500 py-1 rounded text-white">报告</button>
+                                    <button onClick={(e) => { e.stopPropagation(); engine.initiatePass(card.id, PassMethod.SECRET); }} className="text-xs w-16 bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded text-white font-medium">机密</button>
+                                    <button onClick={(e) => { e.stopPropagation(); engine.initiatePass(card.id, PassMethod.REPORT); }} className="text-xs w-16 bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded text-white font-medium">报告</button>
                                     <button onClick={(e) => {
                                       e.stopPropagation();
                                       setPendingDeliverCardId(card.id);
-                                    }} className="text-[10px] w-14 bg-indigo-600 hover:bg-indigo-500 py-1 rounded text-white">给予</button>
+                                    }} className="text-xs w-16 bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded text-white font-medium">给予</button>
                                   </>
                                 )}
                               </div>
@@ -391,22 +511,35 @@ function CardView({ card, hidden, isGM, onTrash }: CardViewProps) {
   const isDanger = card.properties.includes(CardProperty.DANGER);
   const isPrecious = card.properties.includes(CardProperty.PRECIOUS);
   const isTopSecret = card.properties.includes(CardProperty.TOP_SECRET);
+  const hasImage = !!card.imageUrl;
 
   return (
     <div
-      className={`relative w-20 h-28 rounded-md border p-2 flex flex-col justify-between select-none bg-zinc-800 border-zinc-700 shadow-md ${isGM ? 'cursor-grab active:cursor-grabbing hover:ring-1 hover:ring-zinc-500' : ''}`}
+      className={`relative w-20 h-28 rounded-md border flex flex-col justify-between select-none shadow-md overflow-hidden ${hasImage ? 'border-zinc-600 bg-zinc-900' : 'bg-zinc-800 border-zinc-700 p-2'} ${isGM ? 'cursor-grab active:cursor-grabbing hover:ring-1 hover:ring-zinc-500' : ''}`}
       draggable={isGM}
       onDragStart={isGM ? (e) => {
         e.dataTransfer.setData('cardId', card.id);
       } : undefined}
     >
-      {isGM && <button onClick={onTrash} className="absolute top-1 right-1 text-zinc-500 hover:text-red-500 z-50 p-1"><Trash2 size={12} /></button>}
-      <div className="flex flex-col gap-1.5 z-10 w-full items-start pointer-events-none">
+      {/* Custom card image background */}
+      {hasImage && (
+        <img
+          src={card.imageUrl}
+          alt={card.name}
+          className="absolute inset-0 w-full h-full object-cover opacity-80"
+          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+        />
+      )}
+      {/* scrim so text is readable over image */}
+      {hasImage && <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />}
+
+      {isGM && <button onClick={onTrash} className="absolute top-1 right-1 text-zinc-400 hover:text-red-500 z-50 p-1 bg-black/40 rounded"><Trash2 size={12} /></button>}
+      <div className={`flex flex-col gap-1.5 z-10 w-full items-start ${hasImage ? 'p-1.5' : ''} pointer-events-none`}>
         {isTopSecret && <div className="w-3 h-3 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]" title="绝密" />}
         {isPrecious && <div className="w-3 h-3 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.8)]" title="珍贵" />}
         {isDanger && <div className="w-3 h-3 rounded-full bg-black border border-zinc-600 shadow-[0_0_5px_rgba(0,0,0,0.5)]" title="危险" />}
       </div>
-      <div className="text-[10px] font-medium leading-tight text-center text-zinc-300 z-10 border-t border-zinc-700/50 pt-1 mt-1 pointer-events-none">
+      <div className={`text-[10px] font-medium leading-tight text-center text-zinc-200 z-10 border-t ${hasImage ? 'border-white/20 bg-black/40 px-1 py-1 mb-0' : 'border-zinc-700/50 pt-1 mt-1 mx-2 mb-2'} pointer-events-none`}>
         {card.name}
       </div>
     </div>
